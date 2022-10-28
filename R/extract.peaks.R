@@ -20,9 +20,10 @@
 #' ex.output <- extract.peaks(directory = path.package("peak.gas"))
 #' @export extract.peaks
 
-extract.peaks <- function(directory = choose.dir(), cut.off = 2, method = "linear", standard.sum = FALSE,
-                          check.stand = FALSE, check.alpha = .05, ci.meth = "avg",
-                          verbose = TRUE){
+extract.peaks <- function(directory = choose.dir(), cut.off = 2,
+                          method = "linear", standard.sum = FALSE,
+                          check.stand = FALSE, check.alpha = .05,
+                          ci.meth = "avg", verbose = TRUE){
   setwd(directory)
   if(verbose == TRUE){
     message("Working directory set to:")
@@ -46,6 +47,9 @@ extract.peaks <- function(directory = choose.dir(), cut.off = 2, method = "linea
   if(verbose != TRUE & check.stand != FALSE){
     stop(c("verbose argument must be either 'TRUE' or 'FALSE' not ", verbose))
   }
+
+  # Creates a Peaks function that identifies CO2 readings that are higher
+  # than the manually set cut.off threshold (baseline)
   Peaks <- function(x){
     output <- vector()
     for(i in 1:length(x)){
@@ -53,56 +57,41 @@ extract.peaks <- function(directory = choose.dir(), cut.off = 2, method = "linea
     }
     output
   }
-  numextract <- function(string){
-    as.numeric(str_extract(string, "\\-*\\d+\\.*\\d*"))
-  }
-  filelist <- list.files(pattern = c(".txt", ".TXT"))
-  output.raw <- data.frame()
+
+  filelist <- list.files(paste0("data/cleaned_data/LICOR/"),
+                                pattern = c(".txt", ".TXT"))
+  output_summary <- data.frame()
   if(verbose == TRUE){
     print("Looping through Folder:")
     progress_bar <- txtProgressBar(min = 0, max = length(filelist), style = 3)
   }
+  # Cleans and calculates for every file in filelist
   for(a in 1:length(filelist)){
     if(verbose == TRUE){
       setTxtProgressBar(progress_bar, a)
     }
-    b <- read.table(filelist[a], header = TRUE, sep = "\t", fill = TRUE, strip.white = TRUE, check.names = FALSE)
-    if(length(b) != 3){
-      print(' ')
-      stop(c(filelist[a], ' is not formatted properly, 3 columns are required.'))
-    }
-    data.1 <- mutate(b, Sample = rep(NA, nrow(b)), .before = 1)
-    names(data.1) <- c("Sample", "Test", "Time", "CO2")
-    data.2 <- filter(data.1, Test != "--------------------------------------------------------------")
-    data.3 <- data.2
-    for(i in 1:nrow(data.2)){
-      if(is.na(data.2[i,4])==TRUE){
-        data.3[i,1] <- as.character(data.2[i,2])
-      } else {
-        next
-      }
-    }
-    file.annot <- filter(data.3, is.na(CO2)) %>%
-      mutate("temp" = c(1:length(Sample))) %>%
-      mutate("Sample" = paste0(Sample, "/", temp))
-    for(i in 1:nrow(data.3)){
-      if(is.na(data.3$CO2[i])){
-        data.3$Sample[i] <- file.annot$Sample[1]
-        file.annot <- file.annot[-1, ]
-      } else {
-        next
-      }
-    }
-    data.4 <- na.omit(fill(data.3, Sample, .direction = "down"))
-    Preserve.order <- unique(data.4$Sample)
-    options(dplyr.summarise.inform = FALSE)
-    test.2 <- data.4 %>%
-      group_by(Sample) %>%
-      mutate("Sample" = factor(Sample, levels = Preserve.order)) %>%
-      summarise("Peaks" = Peaks(CO2)) %>%
-      arrange(Sample) %>%
+    # Reads in file
+    b <- read.csv(paste0("data/cleaned_data/LICOR/",
+      filelist[a]), header = TRUE, sep = "\t", fill = TRUE,
+      strip.white = TRUE, check.names = FALSE)
+
+    data.1 <- b %>%
+      # Selects only Date, Time, and CO2
+      select(1:3) %>%
+      rename("Date" = 1,
+             "Time" = 2,
+             "CO2" = 3) %>%
+      mutate(Time = paste(Date, Time)) %>%
+      select(-Date)
+    # Convert times into doubles
+    data.1$Time <- lubridate::as_datetime(data.1$Time)
+
+    # Identify rows that will be used for peak calculation
+    test.2 <- data.1 %>%
+      mutate("Peaks" = Peaks(CO2)) %>%
       mutate("Value" = !is.na(Peaks), "Replicate" = NA)
-    test.2 <- cbind(test.2, "Time" = lubridate::as_datetime(data.4$Time))
+
+    # Add time column
     test.2 <- arrange(test.2, Time)
     r <- 0
     for(i in 1:(length(test.2$Value)-1)){
@@ -116,6 +105,8 @@ extract.peaks <- function(directory = choose.dir(), cut.off = 2, method = "linea
         test.2$Replicate[i] <- r
       }
     }
+
+    # Sets baseline to cut.off value (default = 2)
     for(i in 2:(length(test.2$Value)-1)){
       if(test.2$Value[i] == FALSE & test.2$Value[i+1] == TRUE){
         test.2$Peaks[i] <- cut.off
@@ -135,8 +126,10 @@ extract.peaks <- function(directory = choose.dir(), cut.off = 2, method = "linea
     for(i in 1:(length(test.3$Peaks)-1)){
       if(test.3$Replicate[i] == test.3$Replicate[i+1]){
         time <- as.numeric(difftime(test.3$Time[i+1], test.3$Time[i]))
+        # Finds area at the beginning of the curve
         if(test.3$Value[i] == FALSE & test.3$Value[i+1] == TRUE){
           test.3$Area[i] <- (time * diff[i+1])/2
+          # Finds are between curves
         } else if(test.3$Value[i] == FALSE & test.3$Value[i+1] == FALSE){
           test.3$Area[i] <- (time * diff[i])/2
         } else if(test.3$Value[i] == TRUE){
@@ -147,39 +140,33 @@ extract.peaks <- function(directory = choose.dir(), cut.off = 2, method = "linea
       }
     }
     test.4 <- test.3 %>%
-      group_by(Sample, Replicate)%>%
-      summarize("AUC" = sum(Area), "Peak" = max(Peaks), "Time_Peak_Start" = min(Time), "Time_Peak_End" = max(Time)) %>%
-      mutate("Subsample" = c(1:length(Sample))) %>%
-      unite(col = "Sample", Sample, Subsample, sep = "/") %>%
+      group_by(Replicate)%>%
+      summarize("AUC" = sum(Area), "Peak" = max(Peaks),
+                "Time_Peak_Start" = min(Time), "Time_Peak_End" = max(Time)) %>%
       arrange(Time_Peak_Start)
-    test.5 <- cbind(File_Name = filelist[a], test.4)
-    test.5 <- separate(test.5, Sample, c("Sample", "Annotation", "Replicate"), sep = "/")
-    test.5 <- mutate(test.5, "Order_Run" = rep(1, n()), .before = 3)
-    g <- 1
-    for(i in 2:nrow(test.5)){
-      if(test.5$Sample[i] == test.5$Sample[i-1]){
-        test.5$Order_Run[i] <- g
-      } else {
-        g <- g + 1
-        test.5$Order_Run[i] <- g
-      }
-    }
-    output.raw <- rbind(output.raw, test.5)
+
+    # Create a summary that includes the sample name + replicate number, date
+    # of injection, and total AUC.
+    auc_summary <- data.frame(sample =
+                                   str_sub(filelist[a], start = 10, end =-13),
+                                 date = str_sub(test.4$Time_Peak_Start[1],
+                                                  end = 10),
+                                 total_auc = sum(test.4$AUC))
+
+    print(auc_summary)
+    output_summary <- rbind(output_summary, auc_summary)
   }
   if(verbose == TRUE){
     print("done")
   }
   output <- output.raw %>%
-    group_by(Sample, Order_Run) %>%
-    unite("Sample", Sample, Replicate, sep = "__") %>%
-    select(-Annotation) %>%
+    group_by(Sample) %>%
+    # unite("Sample", Sample, Replicate, sep = "__") %>%
+    # select(-Annotation) %>%
     arrange(Time_Peak_Start)
-  preserve.order <- unique(output$File_Name)
-  output <- mutate(output, "Timespan_(s)" = as.numeric(difftime(Time_Peak_End, Time_Peak_Start)))
-  output.1 <- filter(output, str_detect(toupper(Sample), "CURVE"))
-  output.1 <- mutate(output.1, "Standard" = numextract(Sample))
-  output.2 <- filter(output, str_detect(toupper(Sample), "CHECK"))
-  output.2 <- mutate(output.2, "Standard" = numextract(Sample))
+  # preserve.order <- unique(output$File_Name)
+
+  # Create a standard curve
   curve <- data.frame(matrix(ncol = 4, nrow = 0))
   colnames(curve) <- c("File_Name", "Y.intercept", "Slope", "R.squared")
   if(dim(output.1)[1] != 0){
